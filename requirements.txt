@@ -1,0 +1,7 @@
+google-generativeai
+pyautogui
+pyttsx3
+SpeechRecognition
+websockets
+PyAudio
+opencv-python
