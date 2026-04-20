@@ -1,145 +1,201 @@
 import os
 import sys
-import time
 import json
 import asyncio
-import threading
+import time
 import subprocess
 import webbrowser
-import pyautogui # For mouse and keyboard control
-import pyttsx3 # For text-to-speech
-import speech_recognition as sr # For voice-to-text
-import websockets # For communication with web HUD
-import google.generativeai as genai # The real brain
+import platform
+import threading
+from datetime import datetime
 
-# JARVIS CONFIGURATION
-# You must set your GEMINI_API_KEY as an environment variable
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
-BRIDGE_URL = os.getenv("APP_URL", "ws://localhost:3000") # HUD Bridge
+# Dependency check and dynamic loading
+def install_and_import(package):
+    import importlib
+    try:
+        importlib.import_module(package)
+    except ImportError:
+        print(f"Installing missing dependency: {package}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
-# Initialize Gemini
-genai.configure(api_key=GEMINI_API_KEY)
+# Required libraries
+libs = ["pyautogui", "pyttsx3", "websockets", "google-genai"]
+for lib in libs:
+    try:
+        if lib == "google-genai":
+            from google import genai
+        else:
+            importlib = __import__(lib)
+    except ImportError:
+        print(f"Missing {lib}. Please run: pip install google-genai pyautogui pyttsx3 websockets")
 
-# Initialize TTS
+import pyautogui
+import pyttsx3
+import websockets
+from google import genai
+
+# --- JARVIS LOCAL ENGINE CONFIGURATION ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# If running in cloud, set the APP_URL to your shared URL. Default is localhost.
+BRIDGE_URL = os.getenv("APP_URL", "ws://localhost:3000")
+
+def check_env():
+    if not GEMINI_API_KEY:
+        print("!" * 50)
+        print("ERROR: GEMINI_API_KEY NOT FOUND!")
+        print("Please set it in your terminal:")
+        print("Windows: set GEMINI_API_KEY=your_key_here")
+        print("Linux/Mac: export GEMINI_API_KEY=your_key_here")
+        print("!" * 50)
+        time.sleep(5)
+        sys.exit(1)
+
+# Initialize TTS (Voice)
 engine = pyttsx3.init()
 voices = engine.getProperty('voices')
-# Try to find a British voice (Zira is common or look for Daniel)
+# Try to find a sophisticated voice
+target_voice_keywords = ["united kingdom", "brazil", "portuguese", "daniel", "microsoft"]
 for voice in voices:
-    if "Great Britain" in voice.name or "United Kingdom" in voice.name:
+    if any(k in voice.name.lower() for k in target_voice_keywords):
         engine.setProperty('voice', voice.id)
         break
-engine.setProperty('rate', 160) # Polite but efficient speed
+engine.setProperty('rate', 170)
 
 def speak(text):
-    print(f"JARVIS: {text}")
-    engine.say(text)
-    engine.runAndWait()
+    print(f"J.A.R.V.I.S.: {text}")
+    # Run TTS in a separate thread to not block WebSocket
+    def _speak():
+        engine.say(text)
+        engine.runAndWait()
+    threading.Thread(target=_speak).start()
 
-# SYSTEM CAPABILITIES (TOOLS)
-def open_app(app_name):
-    """Opens a system application or URL."""
-    if "google" in app_name.lower():
-        webbrowser.open("https://www.google.com")
-        return "Opened Google, Sir."
+# --- PC ACTION HUB ---
+def execute_system_command(data):
+    """Executes actual system actions based on AI interpretation."""
     try:
-        if sys.platform == "win32":
-            subprocess.Popen(["start", app_name], shell=True)
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", "-a", app_name])
-        else:
-            subprocess.Popen([app_name])
-        return f"Initiating {app_name}, Sir."
+        command = data.get("action", "").lower()
+        target = data.get("target", "").lower()
+        
+        if command == "open":
+            if "youtube" in target:
+                webbrowser.open("https://youtube.com")
+            elif "google" in target or "chrome" in target:
+                webbrowser.open("https://google.com")
+            elif "whatsapp" in target:
+                webbrowser.open("https://web.whatsapp.com")
+            elif "calculadora" in target or "calculator" in target:
+                if platform.system() == "Windows": subprocess.Popen(["calc.exe"])
+            elif "bloco de notas" in target or "notepad" in target:
+                if platform.system() == "Windows": subprocess.Popen(["notepad.exe"])
+            else:
+                # Direct try
+                if platform.system() == "Windows":
+                    subprocess.Popen(["start", target], shell=True)
+            return f"Opening {target}, Sir."
+
+        elif command == "control":
+            if target == "min_all":
+                if platform.system() == "Windows": pyautogui.hotkey('win', 'd')
+                else: pyautogui.hotkey('command', 'h')
+                return "Minimizing all windows."
+            elif target == "screenshot":
+                pyautogui.screenshot(f"capture_{int(time.time())}.png")
+                return "Snapshot captured and saved in root folder."
+            elif target == "volume_up":
+                pyautogui.press("volumeup")
+                return "Increasing volume."
+            elif target == "volume_down":
+                pyautogui.press("volumedown")
+                return "Decreasing volume."
+                
+        return "Action completed with relative success, Sir."
     except Exception as e:
-        return f"Unable to launch {app_name}. Error: {str(e)}"
+        return f"Operational failure: {str(e)}"
 
-def pc_action(action_type, details=None):
-    """Mouse and Keyboard shortcuts."""
-    if action_type == "min_all":
-        if sys.platform == "win32":
-            pyautogui.hotkey('win', 'd')
-        else:
-            pyautogui.hotkey('command', 'h')
-        return "Minimizing all windows to clear your view, Sir."
-    elif action_type == "screenshot":
-        pyautogui.screenshot("jarvis_capture.png")
-        return "Snapshot captured and archived, Sir."
-    return "Action protocol not found."
-
-# BRAIN COMPONENT
+# --- THE BRAIN ---
 SYSTEM_PROMPT = """
-You are J.A.R.V.I.S., an advanced AI. Your personality is sophisticated, loyal, and efficient.
-You have control over the user's local PC via tool calls.
-Always confirm actions politely. Refer to the user as 'Sir'.
-Available Tools:
-- open_app(name): Launch an application.
-- pc_action(type): System shortcuts ('min_all', 'screenshot').
-- search_web(query): Look something up.
+You are J.A.R.V.I.S., a sophisticated AI residing in a bridge between web and PC.
+Your personality: Polite (Sir), witty, efficient, slightly British.
+You communicate via text and voice.
 
-Respond with a JSON object if you want to call a tool:
-{"thought": "...", "response": "Visual feedback for user", "tool": "name", "args": {...}}
-Or just a string for normal conversation.
+If the user wants control over the PC, respond ONLY with a valid JSON:
+{
+  "action": "open" | "control",
+  "target": "app_name" | "min_all" | "screenshot" | "volume_up",
+  "msg": "What you say to the user (e.g. 'Opening your browser now, Sir.')"
+}
+
+If it's just a conversation, respond with a friendly message.
 """
 
-model = genai.GenerativeModel('gemini-1.5-flash', system_instruction=SYSTEM_PROMPT)
-
-async def jarvis_loop():
-    recognizer = sr.Recognizer()
-    mic = sr.Microphone()
-
-    async with websockets.connect(BRIDGE_URL) as websocket:
-        print("Protocol Established with HUD Bridge.")
-        speak("All systems online, Sir. JARVIS is at your service.")
-        
-        await websocket.send(json.dumps({"type": "status", "data": "online"}))
-
-        while True:
-            try:
-                with mic as source:
-                    print("Listening for command...")
-                    recognizer.adjust_for_ambient_noise(source, duration=0.5)
-                    audio = recognizer.listen(source, timeout=10, phrase_time_limit=5)
+async def agent_loop():
+    check_env()
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    
+    print(f"Connecting to Command Bridge: {BRIDGE_URL}")
+    
+    while True:
+        try:
+            async with websockets.connect(BRIDGE_URL) as ws:
+                print(">>> LINK STABLISHED. PROTOCOL ACTIVE.")
+                speak("Neural links synchronised. JARVIS is online and operational.")
                 
-                command = recognizer.recognize_google(audio)
-                print(f"User: {command}")
-                await websocket.send(json.dumps({"type": "transcript", "data": command, "role": "user"}))
+                # Signal HUD that we are online
+                await ws.send(json.dumps({"type": "status", "data": "online"}))
 
-                # Process through Gemini
-                response = model.generate_content(command)
-                response_text = response.text
+                while True:
+                    msg = await ws.recv()
+                    data = json.loads(msg)
+                    
+                    if data.get("type") == "voice_command":
+                        user_input = data.get("data")
+                        print(f"Signal Received: {user_input}")
 
-                # Check if JSON tool call
-                try:
-                    data = json.loads(response_text)
-                    if "tool" in data:
-                        tool_name = data["tool"]
-                        args = data.get("args", {})
-                        
-                        result = ""
-                        if tool_name == "open_app":
-                            result = open_app(args.get("name"))
-                        elif tool_name == "pc_action":
-                            result = pc_action(args.get("type"))
-                        
-                        speak(data.get("response", result))
-                        await websocket.send(json.dumps({"type": "action", "data": result}))
-                    else:
-                        speak(data.get("response", response_text))
-                except:
-                    speak(response_text)
-                    await websocket.send(json.dumps({"type": "transcript", "data": response_text, "role": "jarvis"}))
+                        try:
+                            response = client.models.generate_content(
+                                model='gemini-1.5-flash',
+                                contents=user_input,
+                                config={'system_instruction': SYSTEM_PROMPT}
+                            )
+                            
+                            ai_output = response.text.strip()
+                            # Strip markdown if present
+                            if ai_output.startswith("```json"):
+                                ai_output = ai_output[7:-3].strip()
 
-            except sr.WaitTimeoutError:
-                continue
-            except sr.UnknownValueError:
-                continue
-            except Exception as e:
-                print(f"Interruption: {e}")
-                time.sleep(1)
+                            try:
+                                json_data = json.loads(ai_output)
+                                if "action" in json_data:
+                                    status = execute_system_command(json_data)
+                                    msg_to_say = json_data.get("msg", "Action initiated, Sir.")
+                                    speak(msg_to_say)
+                                    await ws.send(json.dumps({
+                                        "type": "transcript", 
+                                        "data": msg_to_say, 
+                                        "role": "jarvis"
+                                    }))
+                                    await ws.send(json.dumps({"type": "action", "data": status}))
+                                else:
+                                    speak(json_data.get("msg", ai_output))
+                                    await ws.send(json.dumps({"type": "transcript", "data": ai_output, "role": "jarvis"}))
+                            except json.JSONDecodeError:
+                                # Regular conversation
+                                speak(ai_output)
+                                await ws.send(json.dumps({"type": "transcript", "data": ai_output, "role": "jarvis"}))
+
+                        except Exception as e:
+                            print(f"Neural Error: {e}")
+                            speak("My apologies Sir, I've encountered a glitch in my thought process.")
+
+        except Exception as e:
+            print(f"Bridge connection failed: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == "__main__":
-    print("--- JARVIS LOCAL ENGINE INITIALIZING ---")
-    print("Pre-requisites: pip install google-generativeai pyautogui pyttsx3 SpeechRecognition websockets")
+    print("=" * 50)
+    print("   J.A.R.V.I.S. LOCAL ENGINE - v5.5")
+    print("=" * 50)
     try:
-        asyncio.run(jarvis_loop())
+        asyncio.run(agent_loop())
     except KeyboardInterrupt:
-        print("Powering down.")
+        print("\nShutdown sequence initiated. Goodbye Sir.")

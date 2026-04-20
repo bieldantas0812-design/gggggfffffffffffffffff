@@ -1,199 +1,264 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Mic, MicOff, Shield, Activity, Power, Terminal, Zap, MessageSquare, AlertCircle, Cpu } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
-import { 
-  Bell, 
-  Settings, 
-  Terminal, 
-  Mic, 
-  MicOff, 
-  MessageSquare, 
-  X, 
-  Download,
-  ShieldCheck,
-  Zap,
-  Activity,
-  Cpu,
-  RefreshCw
-} from "lucide-react";
 import JarvisEye from "./components/JarvisEye";
-import Dashboard from "./components/Dashboard";
-import { useVirtualPC } from "./hooks/useVirtualPC";
-import { Message } from "./types";
+
+// Speech Recognition Types
+const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+interface LogEntry {
+  id: string;
+  role: 'user' | 'jarvis' | 'system';
+  content: string;
+  timestamp: string;
+}
 
 export default function App() {
-  const { state, notifications, addNotification } = useVirtualPC();
-  const [messages, setMessages] = useState<Message[]>([
-    { role: 'jarvis', content: "Welcome back, Sir. Waiting for local link protocol...", timestamp: new Date() }
-  ]);
+  const [isListening, setIsListening] = useState(false);
   const [agentStatus, setAgentStatus] = useState<'offline' | 'online'>('offline');
-  const [ws, setWs] = useState<WebSocket | null>(null);
-  const [lastAction, setLastAction] = useState<string>("");
-  
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [transcript, setTranscript] = useState("");
+  const ws = useRef<WebSocket | null>(null);
+  const recognition = useRef<any>(null);
 
-  // Connect to the bridge
+  const addLog = useCallback((role: 'user' | 'jarvis' | 'system', content: string) => {
+    setLogs(prev => [
+      { id: Math.random().toString(36), role, content, timestamp: new Date().toLocaleTimeString() },
+      ...prev.slice(0, 49)
+    ]);
+  }, []);
+
+  // Initialize Speech Recognition
   useEffect(() => {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const socket = new WebSocket(`${protocol}//${window.location.host}`);
-    
-    socket.onopen = () => {
-      console.log("HUD connected to Bridge Server");
-      setAgentStatus('offline');
-    };
+    if (!SpeechRecognition) {
+      addLog('system', "Browser unsupported: Speech Recognition required.");
+      return;
+    }
+    recognition.current = new SpeechRecognition();
+    recognition.current.continuous = false;
+    recognition.current.lang = 'pt-BR';
+    recognition.current.interimResults = true;
 
-    socket.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data);
-        console.log("Bridge Payload:", payload);
-
-        if (payload.type === 'status' && payload.data === 'online') {
-          setAgentStatus('online');
-          addNotification("Connection to Local Agent established, Sir.");
-        }
-        
-        if (payload.type === 'transcript') {
-          setMessages(prev => [...prev, { 
-            role: payload.role as any, 
-            content: payload.data, 
-            timestamp: new Date() 
-          }]);
-        }
-
-        if (payload.type === 'action') {
-          setLastAction(payload.data);
-          addNotification(`Action Executed: ${payload.data}`);
-        }
-      } catch (e) {
-        console.error("Payload Parse Error", e);
+    recognition.current.onresult = (event: any) => {
+      const current = event.results[event.results.length - 1][0].transcript;
+      setTranscript(current);
+      if (event.results[0].isFinal) {
+        sendCommand(current);
+        setTranscript("");
       }
     };
 
-    socket.onclose = () => setAgentStatus('offline');
-    setWs(socket);
+    recognition.current.onend = () => setIsListening(false);
+    recognition.current.onerror = (e: any) => {
+      console.error("Speech Error:", e);
+      setIsListening(false);
+    };
+  }, [addLog]);
 
-    return () => socket.close();
-  }, []);
-
+  // WebSocket Connection
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    const connectWS = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const host = window.location.host;
+      const socket = new WebSocket(`${protocol}//${host}`);
+
+      socket.onopen = () => {
+        setConnectionError(null);
+        addLog('system', "Command Bridge Established.");
+        socket.send(JSON.stringify({ type: 'status_check' }));
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'status' && message.data === 'online') {
+            setAgentStatus('online');
+            addLog('system', "Local JARVIS Agent connected.");
+          }
+          if (message.type === 'transcript') {
+            addLog(message.role, message.data);
+          }
+          if (message.type === 'action') {
+            addLog('system', `EXECUTING: ${message.data}`);
+          }
+        } catch (e) {
+          console.error("WS Parse Error", e);
+        }
+      };
+
+      socket.onclose = () => {
+        setAgentStatus('offline');
+        setConnectionError("Link Lost. Reconnecting...");
+        setTimeout(connectWS, 3000);
+      };
+
+      ws.current = socket;
+    };
+
+    connectWS();
+    return () => ws.current?.close();
+  }, [addLog]);
+
+  const sendCommand = (text: string) => {
+    if (ws.current?.readyState === WebSocket.OPEN) {
+      addLog('user', text);
+      ws.current.send(JSON.stringify({ type: 'voice_command', data: text }));
+    } else {
+      addLog('system', "ERROR: Command Bridge Down.");
+    }
+  };
+
+  const toggleVoice = () => {
+    if (isListening) {
+      recognition.current?.stop();
+    } else {
+      recognition.current?.start();
+      setIsListening(true);
+    }
+  };
 
   return (
-    <div className="relative h-screen w-full bg-jarvis-bg grid grid-rows-[auto_1fr_auto] overflow-hidden">
-      <div className="absolute inset-0 pointer-events-none opacity-[0.03] bg-[radial-gradient(#00f2ff_1px,transparent_1px)] [background-size:20px_20px]" />
-      <div className="scanline" />
-
-      {/* Top Bar */}
-      <header className="z-10 jarvis-glass px-6 py-4 flex items-center justify-between">
+    <div className="h-screen w-full bg-[#050b10] text-[#00f2ff] font-mono overflow-hidden relative selection:bg-[#00f2ff]/20">
+      {/* Background Grid Pattern */}
+      <div className="absolute inset-0 opacity-10 pointer-events-none" 
+           style={{ backgroundImage: 'radial-gradient(#00f2ff 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
+      
+      {/* HUD Header */}
+      <header className="p-6 border-b border-[#00f2ff]/20 bg-black/40 backdrop-blur-md flex justify-between items-center relative z-20">
         <div className="flex items-center gap-4">
-          <div className="flex flex-col">
-            <h1 className="font-display font-bold text-xl tracking-[0.2em] text-jarvis-cyan">J.A.R.V.I.S. HUB</h1>
-            <span className="font-mono text-[10px] text-white/40 uppercase tracking-widest leading-none">Command Center v5.0.0</span>
+          <motion.div animate={{ rotate: 360 }} transition={{ duration: 10, repeat: Infinity, ease: "linear" }}>
+            <Zap className="text-[#00f2ff]" size={20} />
+          </motion.div>
+          <div>
+            <h1 className="text-xl font-bold tracking-[0.2em] uppercase">J.A.R.V.I.S. HUD</h1>
+            <p className="text-[10px] text-[#00f2ff]/60 uppercase tracking-widest">Protocol v5.5 - Neural Bridge</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-6">
-          <div className={`flex items-center gap-2 px-3 py-1 rounded-full border ${agentStatus === 'online' ? 'border-emerald-500/30 text-emerald-500 bg-emerald-500/5' : 'border-rose-500/30 text-rose-500 bg-rose-500/5'}`}>
-            <div className={`w-1.5 h-1.5 rounded-full ${agentStatus === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-            <span className="font-mono text-[10px] uppercase font-bold tracking-widest">Local Link: {agentStatus}</span>
+        <div className="flex gap-6 items-center">
+          <div className="flex flex-col items-end">
+            <span className="text-[9px] uppercase opacity-50">Local Agent</span>
+            <div className={`flex items-center gap-2 ${agentStatus === 'online' ? 'text-emerald-400' : 'text-rose-500'}`}>
+              <div className={`w-2 h-2 rounded-full ${agentStatus === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+              <span className="text-xs font-bold uppercase">{agentStatus}</span>
+            </div>
           </div>
-          <button className="text-white/40 hover:text-white"><Settings size={18} /></button>
+          <div className="h-10 w-px bg-[#00f2ff]/20" />
+          <Activity size={24} className="opacity-50" />
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="relative z-10 flex flex-col items-center justify-center gap-8 overflow-y-auto pt-8 pb-32 px-4 no-scrollbar">
-        
-        <div className="flex flex-col items-center gap-6">
-          <JarvisEye isListening={false} isSpeaking={agentStatus === 'online'} />
-          
-          {agentStatus === 'offline' && (
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="jarvis-glass rounded-2xl p-8 max-w-2xl text-center border-jarvis-cyan/20"
-            >
-              <h2 className="text-jarvis-cyan font-display text-xl mb-4 tracking-wider uppercase">Local Agent Setup Required</h2>
-              <p className="text-white/60 text-sm mb-6 leading-relaxed">
-                Sir, to control your actual workstation, I need a local presence. 
-                Please export this project and execute the <code className="text-jarvis-cyan bg-white/5 px-2 py-1 rounded">local_jarvis.py</code> script on your machine.
-              </p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
-                <div className="p-4 bg-white/5 rounded-lg border border-white/10">
-                  <div className="flex items-center gap-2 mb-2 text-jarvis-cyan"><Zap size={14} /> <span>Prerequisites</span></div>
-                  <pre className="text-[10px] opacity-50 font-mono">pip install google-generativeai pyautogui pyttsx3 SpeechRecognition websockets</pre>
+      {/* Main UI */}
+      <div className="grid grid-cols-12 h-[calc(100vh-80px)] overflow-hidden">
+        {/* Left Panel: Status/Tech */}
+        <aside className="col-span-3 border-r border-[#00f2ff]/10 p-6 flex flex-col gap-8 bg-black/20">
+          <div className="space-y-4">
+            <h3 className="text-sm font-bold flex items-center gap-2"><Cpu size={16}/> SYSTEM_METRICS</h3>
+            <div className="space-y-2 opacity-80">
+              {['CPU_LOAD', 'MEM_FREQ', 'NET_LINK', 'GPIO_STB'].map((stat, i) => (
+                <div key={stat} className="flex justify-between text-[10px]">
+                  <span>{stat}</span>
+                  <span className="text-emerald-400">{Math.floor(Math.random() * 40 + 20)}%</span>
                 </div>
-                <div className="p-4 bg-white/5 rounded-lg border border-white/10">
-                  <div className="flex items-center gap-2 mb-2 text-jarvis-cyan"><ShieldCheck size={14} /> <span>Security</span></div>
-                  <p className="text-[10px] opacity-50">Requires local GEMINI_API_KEY environment variable. Grant microphone and accessibility permissions.</p>
-                </div>
-              </div>
-
-              <div className="mt-8 flex gap-4 justify-center">
-                 <button className="flex items-center gap-2 bg-jarvis-cyan text-jarvis-bg px-6 py-2 rounded-full font-bold text-sm tracking-wider hover:scale-105 transition-transform">
-                   <Download size={16} /> EXPORT PROJECT
-                 </button>
-                 <button className="flex items-center gap-2 border border-jarvis-cyan text-jarvis-cyan px-6 py-2 rounded-full font-bold text-sm tracking-wider hover:bg-jarvis-cyan/10">
-                   <Terminal size={16} /> VIEW PYTHON CODE
-                 </button>
-              </div>
-            </motion.div>
-          )}
-        </div>
-
-        <Dashboard state={state} />
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-6xl mx-auto px-4">
-          <div className="jarvis-glass rounded-xl p-6 md:col-span-2">
-            <h3 className="text-white/40 text-[10px] uppercase tracking-widest mb-4 flex items-center gap-2"><Activity size={14} /> Real-Time Telemetry</h3>
-            {lastAction ? (
-              <div className="flex flex-col gap-2">
-                <div className="text-lg font-display text-jarvis-cyan tracking-tight">{lastAction}</div>
-                <div className="text-[10px] font-mono text-white/30 uppercase">Protocol Executed Successfully</div>
-              </div>
-            ) : (
-              <div className="text-white/20 italic text-sm">System standing by for telemetry data...</div>
-            )}
-            
-            <div className="mt-6 pt-6 border-t border-white/5 grid grid-cols-3 gap-4">
-               <div className="flex flex-col">
-                 <span className="text-[9px] uppercase text-white/40">Voice Engine</span>
-                 <span className="text-sm font-mono text-jarvis-cyan font-bold">READY</span>
-               </div>
-               <div className="flex flex-col">
-                 <span className="text-[9px] uppercase text-white/40">Neural Link</span>
-                 <span className={`text-sm font-mono font-bold ${agentStatus === 'online' ? 'text-emerald-500' : 'text-rose-500'}`}>{agentStatus.toUpperCase()}</span>
-               </div>
-               <div className="flex flex-col">
-                 <span className="text-[9px] uppercase text-white/40">Latency</span>
-                 <span className="text-sm font-mono text-white/60">42ms</span>
-               </div>
+              ))}
             </div>
           </div>
 
-          <div className="jarvis-glass rounded-xl p-6 flex flex-col h-[300px]">
-             <h3 className="text-white/40 text-[10px] uppercase tracking-widest mb-4 flex items-center gap-2"><MessageSquare size={14} /> Uplink Logs</h3>
-             <div className="flex-1 overflow-y-auto space-y-3 no-scrollbar pr-2">
-                {messages.map((m, i) => (
-                  <div key={i} className={`flex flex-col ${m.role === 'jarvis' ? 'items-start' : 'items-end'}`}>
-                    <div className={`p-2 rounded-lg text-[11px] ${m.role === 'jarvis' ? 'bg-jarvis-cyan/10 border border-jarvis-cyan/20' : 'bg-white/5 border border-white/10'}`}>
-                      {m.content}
+          <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+             <h3 className="text-sm font-bold flex items-center gap-2"><Terminal size={16}/> SIGNAL_LOGS</h3>
+             <div className="flex-1 overflow-y-auto space-y-2 pr-2 scrollbar-hide">
+                {logs.map(log => (
+                  <div key={log.id} className="text-[9px] border-l border-[#00f2ff]/20 pl-2 py-1 bg-white/5">
+                    <div className="flex justify-between items-center opacity-40 mb-1">
+                      <span className="font-bold">{log.role.toUpperCase()}</span>
+                      <span>{log.timestamp}</span>
                     </div>
+                    <div className={log.role === 'system' ? 'text-[#00f2ff]/60' : 'text-white'}>{log.content}</div>
                   </div>
                 ))}
-                <div ref={chatEndRef} />
              </div>
           </div>
-        </div>
-      </main>
+        </aside>
 
-      <footer className="z-20 jarvis-glass border-t-0 rounded-t-3xl border-x border-white/10 p-4 pt-6 flex flex-col items-center gap-2">
-        <div className="text-[10px] font-mono text-white/20 uppercase tracking-[0.3em] flex items-center gap-4">
-          <div className="flex items-center gap-1"><Cpu size={12} /> SECURE BRIDGE</div>
-          <div className="flex items-center gap-1"><RefreshCw size={12} className="animate-spin-slow" /> SYNCING</div>
-        </div>
-      </footer>
+        {/* Center Panel: The Eye */}
+        <main className="col-span-6 relative flex flex-col items-center justify-center p-12 overflow-hidden bg-gradient-to-b from-transparent to-black/40">
+          <AnimatePresence>
+            {connectionError && (
+              <motion.div 
+                initial={{ opacity: 0, y: -20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="absolute top-8 px-6 py-2 bg-rose-500/20 border border-rose-500 text-rose-500 text-xs flex items-center gap-2 rounded-full uppercase"
+              >
+                <AlertCircle size={14} /> {connectionError}
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <JarvisEye isListening={isListening} isSpeaking={isListening} />
+          
+          <div className="mt-12 w-full max-w-sm">
+            <div className="h-6 text-center italic text-lg text-white/80 transition-all">
+              {transcript || (isListening ? "Listening..." : "")}
+            </div>
+          </div>
+
+          {/* Voice Button */}
+          <div className="absolute bottom-12 flex flex-col items-center gap-4">
+            <motion.button
+              whileHover={{ scale: 1.1 }}
+              whileTap={{ scale: 0.9 }}
+              onClick={toggleVoice}
+              className={`w-24 h-24 rounded-full border-2 flex items-center justify-center transition-all duration-500 group relative
+                ${isListening 
+                  ? 'border-rose-500/50 bg-rose-500 shadow-[0_0_50px_rgba(244,63,94,0.4)]' 
+                  : 'border-[#00f2ff]/50 bg-[#00f2ff]/10 hover:bg-[#00f2ff]/20 shadow-[0_0_30px_rgba(0,242,255,0.2)]'
+                }`}
+            >
+              {isListening ? <MicOff size={32} className="text-white" /> : <Mic size={32} className="text-[#00f2ff]" />}
+              {/* Outer rings */}
+              <div className="absolute -inset-4 border border-[#00f2ff]/10 rounded-full animate-[spin_8s_linear_infinite]" />
+              <div className="absolute -inset-8 border border-[#00f2ff]/5 rounded-full animate-[spin_12s_linear_infinite_reverse]" />
+            </motion.button>
+            <span className="text-[10px] uppercase tracking-[0.5em] font-bold opacity-30 mt-4">Manual_Uplink</span>
+          </div>
+        </main>
+
+        {/* Right Panel: Tools/Shortcuts */}
+        <aside className="col-span-3 border-l border-[#00f2ff]/10 p-6 flex flex-col gap-6 bg-black/20">
+          <h3 className="text-sm font-bold flex items-center gap-2"><Zap size={16}/> QUICK_COMMANDS</h3>
+          <div className="grid grid-cols-1 gap-2">
+            {[
+              "Abrir Chrome", "Tirar Screenshot", "Minimizar Tudo", "Ouvir Música", "Status Sistema"
+            ].map(cmd => (
+              <button 
+                key={cmd}
+                onClick={() => sendCommand(cmd)}
+                className="text-[10px] text-left p-3 border border-[#00f2ff]/10 bg-white/5 hover:bg-[#00f2ff]/20 hover:border-[#00f2ff]/40 transition-all uppercase"
+              >
+                {cmd}
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-auto p-4 border border-[#00f2ff]/10 bg-white/5 rounded">
+            <h4 className="text-[10px] font-bold mb-2">LOCAL_SETUP_GUIDE</h4>
+            <div className="text-[9px] opacity-70 leading-relaxed">
+              1. Download project ZIP<br/>
+              2. unzip & cd to root<br/>
+              3. Run `setup.bat` (first time)<br/>
+              4. Run `py local_jarvis.py`
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      {/* Decorative corners */}
+      <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-[#00f2ff]" />
+      <div className="absolute top-0 right-0 w-2 h-2 border-t border-r border-[#00f2ff]" />
+      <div className="absolute bottom-0 left-0 w-2 h-2 border-b border-l border-[#00f2ff]" />
+      <div className="absolute bottom-0 right-0 w-2 h-2 border-b border-r border-[#00f2ff]" />
     </div>
   );
 }

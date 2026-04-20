@@ -1,6 +1,6 @@
 {
   "name": "JARVIS AI Assistant",
-  "description": "An advanced AI assistant inspired by JARVIS, featuring voice control, futuristic UI, and system simulation.",
+  "description": "True JARVIS experience. Real PC control via voice, futuristic HUD, and local agent integration using Gemini AI.",
   "requestFramePermissions": ["microphone"],
   "majorCapabilities": []
 }
